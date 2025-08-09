@@ -13,7 +13,7 @@ class ScheduledEventReminder(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
-        self.notified_events = set()  # 이미 알림을 보낸 이벤트 ID 저장
+        self.notified_events_1day = set()  
         self.config_file = 'event_config.json'
         self.config = self.load_config()
         self.check_scheduled_events.start()
@@ -98,14 +98,18 @@ class ScheduledEventReminder(commands.Cog):
                         
                         # 현재 시간과의 차이 계산
                         time_until_event = event_time - current_time
-                        
+
+                        if timedelta(days=0) <= time_until_event <= timedelta(days=1):
+                            if event.id not in self.notified_events_1day:
+                                self.notified_events_1day.add(event.id)
+                                await self.send_event_reminder(event, guild, time_until_event, one_day_alarm=True)
+
                         if timedelta(minutes=0) <= time_until_event <= timedelta(minutes=30):
                             await self.send_event_reminder(event, guild, time_until_event)
-                            self.notified_events.add(event.id)
                     
                         # 이벤트가 지났으면 알림 목록에서 제거
                         elif time_until_event <= timedelta(minutes=0):
-                            self.notified_events.discard(event.id)
+                            self.notified_events_1day.discard(event.id)
                             
             except Exception as e:
                 print(f"서버 {guild.name}에서 이벤트 확인 중 오류: {e}")
@@ -114,7 +118,7 @@ class ScheduledEventReminder(commands.Cog):
     async def before_check_events(self):
         await self.bot.wait_until_ready()
     
-    async def send_event_reminder(self, event, guild, time_remaining):
+    async def send_event_reminder(self, event, guild, time_remaining, one_day_alarm=False):
         """이벤트 알림을 전송합니다."""
         guild_config = self.get_guild_config(guild.id)
         event_config = guild_config['event_settings'].get(event.name.lower(), {})
@@ -197,7 +201,7 @@ class ScheduledEventReminder(commands.Cog):
         try:
             # 역할 멘션 또는 @everyone
             if mention_role:
-                mention_text = f"{mention_role.mention} 이벤트 '{event.name}'가 곧 시작됩니다!"
+                mention_text = f"{mention_role.mention} 이벤트 '{event.name}'가 하루 남았습니다!" if one_day_alarm else f"{mention_role.mention} 이벤트 '{event.name}'가 곧 시작됩니다!"
             elif notification_channel.permissions_for(guild.me).mention_everyone:
                 mention_text = f"@everyone 이벤트 '{event.name}'가 곧 시작됩니다!"
             else:
@@ -356,14 +360,6 @@ class ScheduledEventReminder(commands.Cog):
                 field_value = f"시작: {start_time.strftime('%m/%d %H:%M')}\n"
                 field_value += f"남은 시간: {hours}시간 {minutes}분\n"
                 
-                if event.location:
-                    field_value += f"위치: {event.location}\n"
-                
-                if event.channel:
-                    field_value += f"채널: {event.channel.mention}\n"
-                
-                field_value += f"관심: {event.user_count or 0}명"
-                
                 embed.add_field(
                     name=f"{event.name}",
                     value=field_value,
@@ -425,33 +421,6 @@ class ScheduledEventReminder(commands.Cog):
                     inline=True
                 )
             
-            # 위치
-            if event.location:
-                embed.add_field(name="위치", value=event.location, inline=False)
-            
-            # 채널
-            if event.channel:
-                embed.add_field(name="채널", value=event.channel.mention, inline=True)
-            
-            # 참가자
-            embed.add_field(
-                name="관심 표시",
-                value=f"{event.user_count or 0}명",
-                inline=True
-            )
-            
-            # 생성자
-            if event.creator:
-                embed.add_field(name="생성자", value=event.creator.mention, inline=True)
-            
-            # 이벤트 URL
-            embed.add_field(
-                name="이벤트 링크",
-                value=f"[이벤트 페이지로 이동]({event.url})",
-                inline=False
-            )
-            
-            # 이벤트 이미지 (있는 경우)
             if event.cover_image:
                 embed.set_image(url=event.cover_image.url)
             

@@ -51,48 +51,16 @@ jobs:
         # Ensure scripts are executable
         chmod +x deployment/scripts/startup.sh
 
-    - name: Deploy to Compute Engine
-      run: |
-        # Copy deployment package to the VM
-        gcloud compute scp --recurse \
-          --zone=${{ env.COMPUTE_ZONE }} \
-          deployment/* \
-          ${{ env.COMPUTE_INSTANCE }}:~/flyxiv_observer/
-        
-        # Execute deployment commands on the VM
-        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
-          --zone=${{ env.COMPUTE_ZONE }} \
-          --command="cd ~/flyxiv_observer && \
-                     chmod +x scripts/startup.sh && \
-                     sudo cp scripts/flyxiv-observer.service /etc/systemd/system/ && \
-                     sudo systemctl daemon-reload && \
-                     sudo systemctl restart flyxiv-observer && \
-                     sudo systemctl enable flyxiv-observer"
-
-    - name: Check deployment status
-      run: |
-        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
-          --zone=${{ env.COMPUTE_ZONE }} \
-          --command="sudo systemctl status flyxiv-observer --no-pager"
-
-    - name: Verify deployment
-      run: |
-        # Check if the service is running
-        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
-          --zone=${{ env.COMPUTE_ZONE }} \
-          --command="sudo systemctl is-active flyxiv-observer"
-        
-        # Check recent logs
-        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
-          --zone=${{ env.COMPUTE_ZONE }} \
-          --command="sudo journalctl -u flyxiv-observer --no-pager -n 20"
-
-    - name: Notify deployment success
-      run: |
-        echo "✅ Deployment to Google Compute Engine completed successfully!"
-        echo "Instance: ${{ env.COMPUTE_INSTANCE }}"
-        echo "Zone: ${{ env.COMPUTE_ZONE }}"
-        echo "Project: ${{ env.PROJECT_ID }}"
-        echo ""
-        echo "Bot should be running as systemd service: flyxiv-observer"
-        echo "Check logs with: sudo journalctl -u flyxiv-observer -f" 
+      - name: Deploy to Compute Engine
+        env:
+          INSTANCE_NAME: ${{ secrets.GCE_INSTANCE }}
+          ZONE: ${{ secrets.GCE_ZONE }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          USER_NAME: ${{ secrets.GCE_USER_NAME }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          gcloud compute ssh ${USER_NAME}@${INSTANCE_NAME} \
+            --zone=${ZONE} \
+            --project=${PROJECT_ID} \
+            --command="cd ~/flyxiv_observer_v1 && echo 'DISCORD_TOKEN=${DISCORD_TOKEN}' > .env && echo 'GEMINI_API_KEY=${GEMINI_API_KEY}' >> .env && git pull origin master && . venv/bin/activate && pip install -e . && python -m pyobserver.main"
