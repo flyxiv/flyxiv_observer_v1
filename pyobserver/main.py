@@ -5,16 +5,6 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/bot.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -49,6 +39,39 @@ async def on_ready():
 @bot.event
 async def on_error(event, *args, **kwargs):
     logger.error(f"Error in event {event}: {args} {kwargs}")
+
+@bot.command()
+@commands.is_owner()  # 봇 소유자만 실행 가능
+async def update(ctx):
+    """Git에서 최신 코드를 가져옵니다"""
+    await ctx.send("📥 업데이트를 확인하는 중...")
+    
+    try:
+        # Git pull 실행
+        process = await asyncio.create_subprocess_shell(
+            'git pull origin master',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        # 결과 확인
+        if process.returncode == 0:
+            output = stdout.decode()
+            if "Already up to date." in output:
+                await ctx.send("✅ 이미 최신 버전입니다!")
+            else:
+                await ctx.send(f"✅ 업데이트 완료!\n```\n{output}\n```")
+                await ctx.send("🔄 봇을 재시작합니다...")
+                await bot.close()
+                # 봇 재시작
+                os.execv(sys.executable, ['python'] + sys.argv)
+        else:
+            await ctx.send(f"❌ 업데이트 실패:\n```\n{stderr.decode()}\n```")
+            
+    except Exception as e:
+        await ctx.send(f"❌ 오류 발생: {str(e)}")
+
 
 def main():
     """Main function to run the bot"""

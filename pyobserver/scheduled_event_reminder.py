@@ -89,6 +89,7 @@ class ScheduledEventReminder(commands.Cog):
             try:
                 # 서버의 모든 예정된 이벤트 가져오기
                 events = await guild.fetch_scheduled_events()
+                print(f"events: {events}")
                 
                 for event in events:
                     # 이벤트가 예정됨 상태인지 확인
@@ -270,6 +271,8 @@ class ScheduledEventReminder(commands.Cog):
     async def show_event_settings(self, ctx):
         """현재 서버의 이벤트 알림 설정을 표시합니다."""
         guild_config = self.get_guild_config(ctx.guild.id)
+        events = await ctx.guild.fetch_scheduled_events()
+        print(f"events: {events}")
         
         embed = discord.Embed(
             title="📋 이벤트 알림 설정",
