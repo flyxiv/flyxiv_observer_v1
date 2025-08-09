@@ -49,7 +49,7 @@ async def update(ctx):
     try:
         # Git pull 실행
         process = await asyncio.create_subprocess_shell(
-            'git pull origin master',
+            'git pull origin main',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
