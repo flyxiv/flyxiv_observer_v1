@@ -1,0 +1,98 @@
+name: Deploy to Google Compute Engine
+
+on:
+  push:
+    branches: [ master, main ]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  COMPUTE_ZONE: ${{ secrets.GCP_COMPUTE_ZONE }}
+  COMPUTE_INSTANCE: ${{ secrets.GCP_COMPUTE_INSTANCE }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+
+    - name: Configure Google Cloud credentials
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+    - name: Setup Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Create deployment package
+      run: |
+        # Create deployment directory
+        mkdir -p deployment
+        cp -r pyobserver deployment/
+        cp pyproject.toml deployment/
+        cp requirements.txt deployment/
+        cp -r scripts deployment/
+        
+        # Create logs directory
+        mkdir -p deployment/logs
+        
+        # Ensure scripts are executable
+        chmod +x deployment/scripts/startup.sh
+
+    - name: Deploy to Compute Engine
+      run: |
+        # Copy deployment package to the VM
+        gcloud compute scp --recurse \
+          --zone=${{ env.COMPUTE_ZONE }} \
+          deployment/* \
+          ${{ env.COMPUTE_INSTANCE }}:~/flyxiv_observer/
+        
+        # Execute deployment commands on the VM
+        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
+          --zone=${{ env.COMPUTE_ZONE }} \
+          --command="cd ~/flyxiv_observer && \
+                     chmod +x scripts/startup.sh && \
+                     sudo cp scripts/flyxiv-observer.service /etc/systemd/system/ && \
+                     sudo systemctl daemon-reload && \
+                     sudo systemctl restart flyxiv-observer && \
+                     sudo systemctl enable flyxiv-observer"
+
+    - name: Check deployment status
+      run: |
+        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
+          --zone=${{ env.COMPUTE_ZONE }} \
+          --command="sudo systemctl status flyxiv-observer --no-pager"
+
+    - name: Verify deployment
+      run: |
+        # Check if the service is running
+        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
+          --zone=${{ env.COMPUTE_ZONE }} \
+          --command="sudo systemctl is-active flyxiv-observer"
+        
+        # Check recent logs
+        gcloud compute ssh ${{ env.COMPUTE_INSTANCE }} \
+          --zone=${{ env.COMPUTE_ZONE }} \
+          --command="sudo journalctl -u flyxiv-observer --no-pager -n 20"
+
+    - name: Notify deployment success
+      run: |
+        echo "✅ Deployment to Google Compute Engine completed successfully!"
+        echo "Instance: ${{ env.COMPUTE_INSTANCE }}"
+        echo "Zone: ${{ env.COMPUTE_ZONE }}"
+        echo "Project: ${{ env.PROJECT_ID }}"
+        echo ""
+        echo "Bot should be running as systemd service: flyxiv-observer"
+        echo "Check logs with: sudo journalctl -u flyxiv-observer -f" 
