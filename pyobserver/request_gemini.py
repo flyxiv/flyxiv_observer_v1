@@ -23,4 +23,4 @@ def request_gemini(model: GeminiModels, prompt, image_url=None):
     else:
         response = model.generate_content(prompt)
 
-    return response
+    return response.text
