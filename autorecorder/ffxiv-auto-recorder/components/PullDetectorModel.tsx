@@ -1,3 +1,5 @@
+"use client";
+
 // Use the browser/Electron-renderer ONNX Runtime backends
 import * as ort from 'onnxruntime-web';
 // Register GPU backends (side-effect imports)
@@ -10,7 +12,7 @@ let inferBusy = false;
 const MODEL_W = 384;
 const MODEL_H = 384;
 const START_THRESH = 0.7;
-const END_THRESH = 0.7;
+const END_THRESH = 1.5;
 const FALLBACK_INPUT_NAME = 'input';
 
 // If you place ORT wasm files under a public path (optional), you can hint the loader:
@@ -18,7 +20,9 @@ const FALLBACK_INPUT_NAME = 'input';
 // CDN option avoids bundler 404s in dev.
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 // Ensure the model is reachable by the renderer (put it in `public/`)
-const MODEL_URL = '/ffxiv_pull_detector.onnx';
+const START_MODEL_URL = '/ffxiv_pull_start_detector.onnx';
+const END_MODEL_URL = '/ffxiv_pull_end_detector.onnx';
+
 
 type EP = NonNullable<ort.InferenceSession.SessionOptions['executionProviders']>[number];
 const pickEPs = () => {
@@ -57,10 +61,18 @@ async function ensureWebGPUDevice() {
   return webgpuInitPromise;
 }
 
-const sessionPromise = (async () => {
+const startSessionPromise = (async () => {
   await ensureWebGPUDevice();
-  return ort.InferenceSession.create(MODEL_URL, { executionProviders: pickEPs() });
+  return ort.InferenceSession.create(START_MODEL_URL, { executionProviders: pickEPs() });
 })();
+
+const endSessionPromise = (async () => {
+  await ensureWebGPUDevice();
+  return ort.InferenceSession.create(END_MODEL_URL, { executionProviders: pickEPs() });
+})();
+
+const NORMALIZE_VALUES = [0.485, 0.456, 0.406];
+const STD_VALUES = [0.229, 0.224, 0.225];
 
 function imageDataToTensor(img: ImageData): ort.Tensor {
   const { width: W, height: H, data: rgba } = img;
@@ -71,9 +83,9 @@ function imageDataToTensor(img: ImageData): ort.Tensor {
     for (let x = 0; x < W; x++) {
       const si = (y * W + x) * 4;          // RGBA source index
       const di = y * W + x;                // planar index
-      chw[0 * stride + di] = rgba[si + 0] / 255; // R
-      chw[1 * stride + di] = rgba[si + 1] / 255; // G
-      chw[2 * stride + di] = rgba[si + 2] / 255; // B
+      chw[0 * stride + di] = (rgba[si + 0] / 255 - NORMALIZE_VALUES[0]) / STD_VALUES[0]; // R
+      chw[1 * stride + di] = (rgba[si + 1] / 255 - NORMALIZE_VALUES[1]) / STD_VALUES[1]; // G
+      chw[2 * stride + di] = (rgba[si + 2] / 255 - NORMALIZE_VALUES[2]) / STD_VALUES[2]; // B
     }
   }
   return new ort.Tensor('float32', chw, [1, 3, H, W]);
@@ -106,47 +118,43 @@ function resizeToModel(image: ImageData): ImageData {
 }
 
 
-async function predictScores(image: ImageData): Promise<Float32Array | null> {
+export async function predictScores(image: ImageData): Promise<[Float32Array, Float32Array] | null> {
   if (inferBusy) return null; // drop frame if previous inference is still running
   inferBusy = true;
   try {
-    const session = await sessionPromise;
-    const inputName = (session as any).inputNames?.[0] ?? FALLBACK_INPUT_NAME;
+    const startSession = await startSessionPromise;
+    const endSession = await endSessionPromise;
+
+    const inputName = (startSession as any).inputNames?.[0] ?? FALLBACK_INPUT_NAME;
 
     const resized = (image.width === MODEL_W && image.height === MODEL_H)
       ? image
       : resizeToModel(image);
 
     const tensor = imageDataToTensor(resized);
-    const outputs = await session.run({ [inputName]: tensor });
+    const startOutputs = await startSession.run({ [inputName]: tensor });
+    const endOutputs = await endSession.run({ [inputName]: tensor });
 
     // prefer declared output name, otherwise first key
-    const outName = (session as any).outputNames?.[0] ?? Object.keys(outputs)[0];
-    const out = outputs[outName];
-    if (!out || !(out.data instanceof Float32Array)) {
+    const startOutName = (startSession as any).outputNames?.[0] ?? Object.keys(startOutputs)[0];
+    const endOutName = (endSession as any).outputNames?.[0] ?? Object.keys(endOutputs)[0];
+    const startOut = startOutputs[startOutName];
+    const endOut = endOutputs[endOutName];
+    if (!startOut || !(startOut.data instanceof Float32Array) || !endOut || !(endOut.data instanceof Float32Array)) {
       // Handle other dtypes if your model outputs something else
-      return new Float32Array(Array.from(out.data as any));
+      return null;
     }
-    return out.data as Float32Array;
+    return [new Float32Array(Array.from(startOut.data as any)), new Float32Array(Array.from(endOut.data as any))];
   } finally {
     inferBusy = false;
   }
 }
 
 
-// Placeholder hooks for AI model triggers — intentionally unimplemented per AGENT.md
-export async function pullStartDetected(image: ImageData) {
-  const scores = await predictScores(image);
-  console.log(scores);
-  if (!scores) return false; // frame dropped due to in-flight inference
-
-  return scores[1] > START_THRESH;
+export async function pullStartDetected(scores: [Float32Array, Float32Array]): Promise<boolean> {
+  return scores[0][0] > START_THRESH;
 }
 
-export async function pullEndDetected(image: ImageData) {
-  const scores = await predictScores(image);
-  if (!scores) return false;
-
-  return scores[2] > END_THRESH;
+export async function pullEndDetected(scores: [Float32Array, Float32Array]): Promise<boolean> {
+  return scores[1][0] > END_THRESH;
 }
-

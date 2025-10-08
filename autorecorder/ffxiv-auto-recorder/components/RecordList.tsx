@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState, useRef } from "react";
-import { pullStartDetected, pullEndDetected } from "./PullDetectorModel";
+import { pullStartDetected, pullEndDetected, predictScores } from "./PullDetectorModel";
 
 type Entry = {
   id: string;
@@ -9,6 +9,7 @@ type Entry = {
   endedAt?: number;
   status: 'recording' | 'completed';
   src?: string; // blob URL of the recorded media
+  path?: string; // original disk path when saved
   _recorder?: MediaRecorder;
   _chunks?: Blob[];
   _stream?: MediaStream;
@@ -21,14 +22,15 @@ export default function RecordList() {
   const [list, setList] = useState<Entry[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const filePickerRef = useRef<HTMLInputElement | null>(null);
   const detectorCleanupRef = useRef<(() => void) | null>(null);
 
   const pickSupportedMime = () => {
+    // Prioritize H.264 - usually hardware accelerated and handles motion best
     const candidates = [
+      'video/webm;codecs=h264',
+      'video/webm;codecs=h264,opus',
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
-      'video/webm;codecs=h264,opus',
       'video/webm'
     ];
     for (const c of candidates) {
@@ -39,13 +41,39 @@ export default function RecordList() {
   };
 
   const getDisplayStream = async (): Promise<MediaStream> => {
-    // First, try Electron IPC to select a single screen (works even when getDisplayMedia is blocked)
     const bridge = (window as any).ffxiv;
+    
+    // 1. First priority: Try to capture FFXIV window directly
+    if (bridge?.selectFfxivWindow) {
+      try {
+        const src = await bridge.selectFfxivWindow();
+        if (src?.id) {
+          console.log('Capturing FFXIV window:', src.name);
+          const constraints: any = {
+            audio: false,
+            video: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: src.id,
+                maxFrameRate: 60
+              }
+            }
+          };
+          // @ts-ignore electron-specific constraints
+          return await navigator.mediaDevices.getUserMedia(constraints);
+        }
+      } catch (err) {
+        console.warn('FFXIV window capture failed, trying screen capture...', err);
+      }
+    }
+    
+    // 2. Fallback: Try screen capture via IPC
     const select = bridge?.selectDesktopSource || bridge?.getSource;
     if (select) {
       try {
         const src = await select();
         if (src?.id) {
+          console.log('Capturing screen:', src.name);
           const constraints: any = {
             audio: false,
             video: {
@@ -63,7 +91,8 @@ export default function RecordList() {
         console.warn('IPC desktop source failed, falling back to getDisplayMedia', err);
       }
     }
-    // Use the standard picker so you choose a single screen/window
+    
+    // 3. Last resort: Use the standard picker
     try {
       return await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
     } catch (e) {
@@ -84,24 +113,47 @@ export default function RecordList() {
 
     const startDetector = async () => {
       try {
-        // Prefer IPC desktop source to avoid prompts for background detector
         const bridge = (window as any).ffxiv;
         let stream: MediaStream | null = null;
-        try {
-          const sel = bridge?.selectDesktopSource || bridge?.getSource;
-          if (sel) {
-            const src = await sel();
+        
+        // 1. Try FFXIV window first for detector
+        if (bridge?.selectFfxivWindow) {
+          try {
+            const src = await bridge.selectFfxivWindow();
             if (src?.id) {
               const constraints: any = {
                 audio: false,
                 video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: src.id, maxFrameRate: 30 } }
               };
               stream = await navigator.mediaDevices.getUserMedia(constraints as MediaStreamConstraints);
+              console.log('AI detector capturing FFXIV window');
             }
+          } catch (e) {
+            console.warn('AI detector: FFXIV window capture failed', e);
           }
-        } catch (e) {
-          // ignore and fall back
         }
+        
+        // 2. Fallback to screen capture
+        if (!stream) {
+          try {
+            const sel = bridge?.selectDesktopSource || bridge?.getSource;
+            if (sel) {
+              const src = await sel();
+              if (src?.id) {
+                const constraints: any = {
+                  audio: false,
+                  video: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: src.id, maxFrameRate: 30 } }
+                };
+                stream = await navigator.mediaDevices.getUserMedia(constraints as MediaStreamConstraints);
+                console.log('AI detector capturing screen');
+              }
+            }
+          } catch (e) {
+            // ignore and fall back
+          }
+        }
+        
+        // 3. Last resort
         if (!stream) {
           try {
             stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false as any });
@@ -137,10 +189,10 @@ export default function RecordList() {
           return { fStart, fEnd };
         };
 
-        const callBoolean = async (fn: any, img: ImageData, which: 'start' | 'end') => {
+        const callBoolean = async (fn: any, scores: [Float32Array, Float32Array], which: 'start' | 'end') => {
           try {
             if (!fn) return false;
-            const res = await fn(img);
+            const res = await fn(scores);
             if (typeof res === 'boolean') return res;
             if (res && typeof res === 'object') {
               if (which === 'start') return !!(res.pullStarted ?? res.started ?? res.isStart ?? res.start);
@@ -158,8 +210,11 @@ export default function RecordList() {
             const { fStart, fEnd } = getDetectors();
 
             // TODO: Disable AI detection when manual recording is active
-            const started = await callBoolean(fStart, img, 'start') && !isManualRecording;
-            const ended = await callBoolean(fEnd, img, 'end') && !isManualRecording;
+            const scores = await predictScores(img);
+            console.log(scores);
+            if (!scores) return;
+            const started = await callBoolean(fStart, scores, 'start') && !isManualRecording;
+            const ended = await callBoolean(fEnd, scores, 'end') && !isManualRecording;
             if (started && !activeId) startRecording();
             if (ended && activeId) stopRecording();
           } catch {
@@ -188,7 +243,7 @@ export default function RecordList() {
 
   // Convert a display stream to a canvas-captured stream to maximize
   // MediaRecorder compatibility on some environments.
-  const toCanvasStream = async (src: MediaStream, fps = 30): Promise<{ out: MediaStream; cleanup: () => void; }> => {
+  const toCanvasStream = async (src: MediaStream, fps = 60): Promise<{ out: MediaStream; cleanup: () => void; }> => {
     const video = document.createElement('video');
     video.srcObject = src;
     video.muted = true;
@@ -225,22 +280,77 @@ export default function RecordList() {
       const name = `Pull ${new Date().toLocaleTimeString()}`;
       const stream = await getDisplayStream();
       if (!stream.getVideoTracks().length) throw new Error('No video track in captured stream');
-      const { out: recStream, cleanup } = await toCanvasStream(stream, 30);
+      
+      // Try to record original stream first for best performance
+      let recStream: MediaStream = stream;
+      let cleanup: () => void = () => {};
+      let useCanvas = false;
+      
+      // Set video track hints for better encoding
+      const track = stream.getVideoTracks()[0];
+      try {
+        if ('contentHint' in track) (track as any).contentHint = 'motion';
+        // Try to ensure 60fps
+        await track.applyConstraints({ 
+          frameRate: { ideal: 60, min: 30 } 
+        });
+      } catch (err) {
+        console.warn('Could not apply track constraints:', err);
+      }
+      
       const chunks: Blob[] = [];
       const mimeType = pickSupportedMime();
+      console.log('Using codec:', mimeType);
       let recorder: MediaRecorder;
+      
+      // Get actual track settings to compute appropriate bitrate
+      const trackSettings = track.getSettings();
+      const width = trackSettings.width || 1920;
+      const height = trackSettings.height || 1080;
+      const fps = trackSettings.frameRate || 60;
+      
+      console.log(`Source: ${width}x${height} @ ${fps}fps`);
+      
+      // Calculate bitrate based on resolution (more reasonable for H.264)
+      // H.264 needs less bitrate than VP8/VP9 for same quality
+      const pixelCount = width * height;
+      const baseRate = 0.15; // bits per pixel per frame for H.264
+      const bitrate = Math.floor(pixelCount * fps * baseRate);
+      const clampedBitrate = Math.min(Math.max(bitrate, 20_000_000), 60_000_000);
+      
+      const opts: any = { 
+        videoBitsPerSecond: clampedBitrate,
+        bitsPerSecond: clampedBitrate,
+        audioBitsPerSecond: 256_000
+      };
+      
+      console.log(`Recording at ${(clampedBitrate / 1_000_000).toFixed(1)} Mbps`);
+      
       try {
-        recorder = mimeType ? new MediaRecorder(recStream, { mimeType }) : new MediaRecorder(recStream);
+        recorder = mimeType ? new MediaRecorder(recStream, { mimeType, ...opts }) : new MediaRecorder(recStream, opts);
+        console.log('Recording original stream directly');
       } catch (err) {
-        console.warn('MediaRecorder with mime failed, trying without...', err);
-        recorder = new MediaRecorder(recStream);
+        console.warn('MediaRecorder on original stream failed, falling back to canvas', err);
+        useCanvas = true;
+        const conv = await toCanvasStream(stream, 60);
+        recStream = conv.out;
+        cleanup = conv.cleanup;
+        try {
+          recorder = mimeType ? new MediaRecorder(recStream, { mimeType, ...opts }) : new MediaRecorder(recStream, opts);
+          console.log('Recording canvas stream');
+        } catch (err2) {
+          console.warn('MediaRecorder with opts failed, trying basic...', err2);
+          recorder = new MediaRecorder(recStream);
+        }
       }
+      
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunks.push(e.data);
       };
-      recorder.onstop = () => { try { cleanup(); } catch {} };
       setIsRecording(true);
-      recorder.start();
+      // Use 500ms timeslice - balances encoding efficiency with responsiveness
+      // H.264 hardware encoders work better with slightly larger chunks
+      try { recorder.start(500); } catch { recorder.start(); }
 
       const entry: Entry = {
         id,
@@ -251,14 +361,18 @@ export default function RecordList() {
         _chunks: chunks,
         _stream: stream,
         _recStream: recStream,
-        _cleanup: cleanup,
+        _cleanup: () => {
+          try { cleanup(); } catch {}
+          if (!useCanvas) {
+            try { stream.getTracks().forEach(t => t.stop()); } catch {}
+          }
+        },
       };
       setList((prev) => [entry, ...prev]);
       setActiveId(id);
     } catch (err: any) {
       console.error('Failed to start recording:', err);
       setError(err?.message ?? 'Failed to start recording');
-      try { filePickerRef.current?.click(); } catch {}
     }
   };
 
@@ -282,8 +396,25 @@ export default function RecordList() {
       await waitForStop;
       const endedAt = Date.now();
       const blob = new Blob(current._chunks ?? [], { type: (recorder as any)?.mimeType || 'video/webm' });
-      const url = URL.createObjectURL(blob);
-      setList((prev) => prev.map((e) => e.id === activeId ? { ...e, status: 'completed', endedAt, src: url, _recorder: undefined, _chunks: undefined, _stream: undefined } : e));
+      try {
+        const arr = await blob.arrayBuffer();
+        const bridge = (window as any).ffxiv;
+        let fileUrl: string | undefined;
+        let savedPath: string | undefined;
+        if (bridge?.saveRecording) {
+          const ext = /mp4/i.test((recorder as any)?.mimeType || '') ? 'mp4' : 'webm';
+          const saved = await bridge.saveRecording(arr, current.name, ext);
+          if (saved?.path) {
+            savedPath = saved.path;
+            fileUrl = typeof bridge.pathToFileUrl === 'function' ? bridge.pathToFileUrl(saved.path) : `file:///${saved.path.replace(/\\/g, '/')}`;
+          }
+        }
+        const finalSrc = fileUrl || URL.createObjectURL(blob);
+        setList((prev) => prev.map((e) => e.id === activeId ? { ...e, status: 'completed', endedAt, src: finalSrc, path: savedPath, _recorder: undefined, _chunks: undefined, _stream: undefined } : e));
+      } catch {
+        const url = URL.createObjectURL(blob);
+        setList((prev) => prev.map((e) => e.id === activeId ? { ...e, status: 'completed', endedAt, src: url, _recorder: undefined, _chunks: undefined, _stream: undefined } : e));
+      }
     } finally {
       setActiveId(null);
       setIsRecording(false);
@@ -317,33 +448,54 @@ export default function RecordList() {
     };
   }, [list]);
 
+  useEffect(() => {
+    // Load existing recordings saved on disk
+    (async () => {
+      const bridge = (window as any).ffxiv;
+      if (!bridge?.listRecordings) return;
+      try {
+        const items: any[] = await bridge.listRecordings();
+        const mapped: Entry[] = (items || []).map((it) => {
+          const src = typeof bridge.pathToFileUrl === 'function' ? bridge.pathToFileUrl(it.path) : `file:///${String(it.path || '').replace(/\\\\/g, '/')}`;
+          return {
+            id: it.id || crypto.randomUUID(),
+            name: it.name || 'Recording',
+            startedAt: Math.floor(it.mtimeMs || Date.now()),
+            endedAt: Math.floor(it.mtimeMs || Date.now()),
+            status: 'completed',
+            src,
+            path: it.path,
+          } as Entry;
+        });
+        if (mapped.length) setList((prev) => {
+          // Avoid duplicating if already loaded in this session
+          const existing = new Set(prev.map(p => p.id));
+          const merged = [...mapped.filter(m => !existing.has(m.id)), ...prev];
+          // Sort by time desc
+          return merged.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+        });
+      } catch {}
+    })();
+  }, []);
+
+  const handleScreenshot = () => {
+    const takeScreenshot = (window as any).takeScreenshot;
+    if (takeScreenshot) takeScreenshot();
+  };
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', gap: 8, padding: 8, borderBottom: '1px solid #222' }}>
-        <button onClick={startManualRecording} style={btn}>Pull Start (S)</button>
-        <button onClick={stopManualRecording} style={btn} disabled={!activeId}>Pull End (E)</button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: 8, borderBottom: '1px solid #222' }}>
+        <button onClick={handleScreenshot} style={btn}>Screenshot</button>
+        <div style={{ flex: 1 }} />
+        <button onClick={startManualRecording} style={btn}>Manual Start (S)</button>
+        <button onClick={stopManualRecording} style={btn} disabled={!activeId}>Manual End (E)</button>
         {error && <span style={{ color: '#ff7676', marginLeft: 12 }}>{error}</span>}
-        <input
-          ref={filePickerRef}
-          type="file"
-          accept="video/*"
-          style={{ display: 'none' }}
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (!f) return;
-            const url = URL.createObjectURL(f);
-            const id = crypto.randomUUID();
-            const entry: Entry = { id, name: f.name, startedAt: Date.now(), endedAt: Date.now(), status: 'completed', src: url };
-            setList((prev) => [entry, ...prev]);
-            e.currentTarget.value = '';
-          }}
-        />
-        <button type="button" style={{ ...btn, marginLeft: 'auto' }} onClick={() => filePickerRef.current?.click()}>Add Video (fallback)</button>
       </div>
 
       <div style={{ overflow: 'auto', flex: 1 }}>
         {list.length === 0 ? (
-          <div style={{ padding: 12, color: '#888' }}>No records yet. Press S to simulate.</div>
+          <div style={{ padding: 12, color: '#888' }}>No records yet. Press S to start manual recording.</div>
         ) : (
           <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {list.map((e) => (
@@ -353,7 +505,7 @@ export default function RecordList() {
                 title={e.status === 'completed' ? 'Click to play' : ''}
                 onClick={() => {
                   if (e.status === 'completed' && e.src) {
-                    window.dispatchEvent(new CustomEvent('play-record', { detail: { id: e.id, name: e.name, src: e.src } }));
+                    window.dispatchEvent(new CustomEvent('play-record', { detail: { id: e.id, name: e.name, src: e.src, path: e.path } }));
                   }
                 }}
               >
