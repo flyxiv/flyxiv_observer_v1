@@ -1,0 +1,11 @@
+batch_size: 32 
+num_epochs: 30 
+device: cpu
+save_dir: ./saved_models
+lr: 0.0015602291970129703
+eta_min: 3.706428531092245e-05
+dataset_base_dir: E:/flyxiv_observer_v1/data/ffxiv_pulldetector_v1
+model_name: pull_detector
+
+mlflow_host: 127.0.0.1
+mlflow_port: 8080

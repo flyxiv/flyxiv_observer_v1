@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import subprocess
+import threading
 from discord.ext import commands
 from pyobserver.ffxiv_stream_collector.dropbox import upload_to_dropbox
 import discord.utils
@@ -12,28 +13,38 @@ class LiveStreamRecorder(commands.Cog):
 
     @commands.command(name='record_stream')
     async def record_stream(self, ctx, channel_url, record_time=3600):
-        result_channel = discord.utils.get(ctx.guild.text_channels, name=self.result_channel_name)
+        new_thread = threading.Thread(target=self.record_single_stream, args=(channel_url, record_time, ctx)).start()
 
+
+    async def record_single_stream(self, channel_url, record_time=3600, ctx):
+        result_channel = discord.utils.get(ctx.guild.text_channels, name=self.result_channel_name)
+        
         if channel_url.startswith('https://www.twitch.tv/'):
             channel_name = channel_url.split('/')[-1]
         else:
             channel_name = get_channel_name_ytdlp(channel_url)['channel_name']
 
         os.makedirs(f'recordings/{channel_name}', exist_ok=True)
-        output_file = f"recordings/{channel_name}/{datetime.now().strftime('%Y%m%d_%H%M%S')}.mkv"
 
-        await ctx.send(f"Recording stream: {channel_url}")
-        self.record_local(channel_url, output_file, record_time)
+        record_cnt = 0
 
-        await ctx.send(f"Saving output to Dropbox")
-        public_url = upload_to_dropbox(output_file)
+        while record_cnt < 10:
+            output_file = f"recordings/{channel_name}/{datetime.now().strftime('%Y%m%d_%H%M%S')}.mkv"
 
+            await ctx.send(f"Recording stream: {channel_url}")
+            self.record_local(channel_url, output_file, record_time)
 
-        await result_channel.send(f"--------------------------------------------------")
-        await result_channel.send(f"New recording for {channel_url}")
-        await result_channel.send(embed=discord.Embed(description=f"Timestamp: {output_file.split('/')[-1][:-4]}"))
-        await result_channel.send(embed=discord.Embed(description=f"Download link: {public_url}"))
-        await result_channel.send(f"--------------------------------------------------")
+            await ctx.send(f"Saving output to Dropbox")
+            public_url = upload_to_dropbox(output_file)
+
+            await result_channel.send(f"--------------------------------------------------")
+            await result_channel.send(f"New recording for {channel_url}")
+            await result_channel.send(embed=discord.Embed(description=f"Timestamp: {output_file.split('/')[-1][:-4]}"))
+            await result_channel.send(embed=discord.Embed(description=f"Download link: {public_url}"))
+            await result_channel.send(f"--------------------------------------------------")
+
+            record_cnt += 1
+
 
     def record_local(self, channel_url, output_file, record_time=3600):
         print(f"Testing recording to: {output_file}")
